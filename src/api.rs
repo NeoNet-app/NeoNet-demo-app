@@ -71,7 +71,6 @@ pub struct WsEvent {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct ConnectPeerRequest {
     addr: String,
 }
@@ -100,7 +99,6 @@ impl NeoNetClient {
 
     /// Ask the daemon to open a QUIC+handshake connection to a peer or relay.
     /// Mirrors `neonet peers connect <addr>`.
-    #[allow(dead_code)]
     pub async fn connect_peer(&self, addr: &str) -> Result<(), String> {
         let url = format!("{}/v1/peers/connect", self.base_url);
         let body = ConnectPeerRequest {

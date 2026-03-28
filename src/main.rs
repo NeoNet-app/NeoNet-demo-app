@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long)]
     invite: Option<String>,
 
+    /// Relay/peer to contact for room sync (required with --room for private rooms)
+    #[arg(long)]
+    via: Option<String>,
+
     /// Temporary config: prompt pseudo interactively, persist nothing to disk
     #[arg(long)]
     tmpconf: bool,
@@ -80,7 +84,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|id| id.address)
         .unwrap_or_default();
 
-    // 5. Determine room
+    // 5. If --room + --via: connect to the peer/relay so the daemon can sync
+    if cli.room.is_some() {
+        if let Some(ref via_addr) = cli.via {
+            let _ = client.connect_peer(via_addr).await;
+        }
+    }
+
+    // 6. Determine room
     let room_id = if let Some(addr) = &cli.invite {
         let room_name = format!("Chat with {}", addr);
         let resp = client
@@ -90,13 +101,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cleanup_terminal();
                 e
             })?;
-        eprintln!("Room created: {}", resp.room_id);
+        // Extract relay from own address (@pubkey:domain → domain:7777)
+        let via_hint = own_address
+            .rsplit_once(':')
+            .map(|(_, domain)| format!("{domain}:7777"))
+            .unwrap_or_default();
+        eprintln!(
+            "Room created: {}\nGive to peer:  --room {} --via {}",
+            resp.room_id, resp.room_id, via_hint
+        );
         resp.room_id
     } else {
         cli.room.unwrap()
     };
 
-    // 6. Connect WebSocket first (so we receive sync_status events)
+    // 7. Connect WebSocket first (so we receive sync_status events)
     let mut app = App::new(pseudo.clone(), room_id.clone(), own_address);
     let mut ws_rx = None;
     let mut ws_tx = None;
@@ -114,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 7. Try to load history — 404 means the room is still syncing
+    // 8. Try to load history — 404 means the room is still syncing
     match client.list_messages(&room_id).await {
         Ok(events) => {
             app.synced = true;
@@ -138,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 8. Event loop
+    // 9. Event loop
     let mut last_sync_retry = std::time::Instant::now();
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
