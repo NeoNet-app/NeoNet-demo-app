@@ -70,6 +70,11 @@ pub struct WsEvent {
     pub status: Option<String>,
 }
 
+#[derive(Serialize)]
+struct ConnectPeerRequest {
+    addr: String,
+}
+
 #[derive(Deserialize)]
 pub struct IdentityResponse {
     pub address: String,
@@ -90,6 +95,30 @@ impl NeoNetClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
         }
+    }
+
+    /// Ask the daemon to open a QUIC+handshake connection to a peer or relay.
+    /// Mirrors `neonet peers connect <addr>`.
+    pub async fn connect_peer(&self, addr: &str) -> Result<(), String> {
+        let url = format!("{}/v1/peers/connect", self.base_url);
+        let body = ConnectPeerRequest {
+            addr: addr.to_string(),
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Connect peer failed ({status}): {text}"));
+        }
+        Ok(())
     }
 
     pub async fn get_identity(&self) -> Result<IdentityResponse, String> {

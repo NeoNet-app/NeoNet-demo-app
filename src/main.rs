@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long)]
     invite: Option<String>,
 
+    /// Peer or relay address to connect to for room sync (host:port)
+    #[arg(long)]
+    via: Option<String>,
+
     /// Temporary config: prompt pseudo interactively, persist nothing to disk
     #[arg(long)]
     tmpconf: bool,
@@ -80,7 +84,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|id| id.address)
         .unwrap_or_default();
 
-    // 5. Determine room
+    // 5. Connect to peer/relay if --via is provided
+    if let Some(ref via_addr) = cli.via {
+        if let Err(e) = client.connect_peer(via_addr).await {
+            eprintln!("Warning: peer connect to {via_addr} failed: {e}");
+        }
+    }
+
+    // 6. Determine room
     let room_id = if let Some(addr) = &cli.invite {
         let room_name = format!("Chat with {}", addr);
         let resp = client
@@ -96,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.room.unwrap()
     };
 
-    // 6. Connect WebSocket first (so we receive sync_status events)
+    // 7. Connect WebSocket first (so we receive sync_status events)
     let mut app = App::new(pseudo.clone(), room_id.clone(), own_address);
     let mut ws_rx = match client.connect_ws(&room_id).await {
         Ok(rx) => Some(rx),
@@ -110,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 7. Try to load history — 404 means the room is still syncing
+    // 8. Try to load history — 404 means the room is still syncing
     match client.list_messages(&room_id).await {
         Ok(events) => {
             app.synced = true;
@@ -134,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 8. Event loop
+    // 9. Event loop
     let mut last_sync_retry = std::time::Instant::now();
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
