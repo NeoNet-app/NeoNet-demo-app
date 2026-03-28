@@ -71,6 +71,7 @@ pub struct WsEvent {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ConnectPeerRequest {
     addr: String,
 }
@@ -99,6 +100,7 @@ impl NeoNetClient {
 
     /// Ask the daemon to open a QUIC+handshake connection to a peer or relay.
     /// Mirrors `neonet peers connect <addr>`.
+    #[allow(dead_code)]
     pub async fn connect_peer(&self, addr: &str) -> Result<(), String> {
         let url = format!("{}/v1/peers/connect", self.base_url);
         let body = ConnectPeerRequest {
@@ -214,11 +216,12 @@ impl NeoNetClient {
         resp.json().await.map_err(|e| format!("Parse error: {e}"))
     }
 
-    /// Connect WebSocket, subscribe to room, return a receiver for incoming events.
+    /// Connect WebSocket, subscribe to room, return a receiver for incoming events
+    /// and a sender to send outgoing WS commands (e.g. re-subscribe after sync).
     pub async fn connect_ws(
         &self,
         room_id: &str,
-    ) -> Result<mpsc::UnboundedReceiver<WsEvent>, String> {
+    ) -> Result<(mpsc::UnboundedReceiver<WsEvent>, mpsc::UnboundedSender<String>), String> {
         let ws_url = self
             .base_url
             .replace("http://", "ws://")
@@ -266,22 +269,48 @@ impl NeoNetClient {
 
         let (tx, rx) = mpsc::unbounded_channel();
 
+        // Channel for outgoing WS messages (re-subscribe, etc.)
+        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<String>();
+
         tokio::spawn(async move {
-            while let Some(msg) = read.next().await {
-                match msg {
-                    Ok(tungstenite::Message::Text(text)) => {
-                        if let Ok(event) = serde_json::from_str::<WsEvent>(&text) {
-                            if tx.send(event).is_err() {
-                                break;
+            loop {
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(tungstenite::Message::Text(text))) => {
+                                if let Ok(event) = serde_json::from_str::<WsEvent>(&text) {
+                                    if tx.send(event).is_err() {
+                                        break;
+                                    }
+                                }
                             }
+                            Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
+                            _ => {}
                         }
                     }
-                    Ok(tungstenite::Message::Close(_)) | Err(_) => break,
-                    _ => {}
+                    outgoing = ws_rx.recv() => {
+                        match outgoing {
+                            Some(text) => {
+                                if write.send(tungstenite::Message::Text(text.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
         });
 
-        Ok(rx)
+        Ok((rx, ws_tx))
+    }
+
+    /// Send a WS subscribe message for a room (used to re-subscribe after sync).
+    pub fn ws_subscribe_msg(room_id: &str) -> String {
+        serde_json::to_string(&WsSubscribe {
+            r#type: "subscribe".to_string(),
+            room_ids: vec![room_id.to_string()],
+        })
+        .unwrap()
     }
 }

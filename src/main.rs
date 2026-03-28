@@ -28,10 +28,6 @@ struct Cli {
     #[arg(long)]
     invite: Option<String>,
 
-    /// Peer or relay address to connect to for room sync (host:port)
-    #[arg(long)]
-    via: Option<String>,
-
     /// Temporary config: prompt pseudo interactively, persist nothing to disk
     #[arg(long)]
     tmpconf: bool,
@@ -84,14 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|id| id.address)
         .unwrap_or_default();
 
-    // 5. Connect to peer/relay if --via is provided
-    if let Some(ref via_addr) = cli.via {
-        if let Err(e) = client.connect_peer(via_addr).await {
-            eprintln!("Warning: peer connect to {via_addr} failed: {e}");
-        }
-    }
-
-    // 6. Determine room
+    // 5. Determine room
     let room_id = if let Some(addr) = &cli.invite {
         let room_name = format!("Chat with {}", addr);
         let resp = client
@@ -107,21 +96,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.room.unwrap()
     };
 
-    // 7. Connect WebSocket first (so we receive sync_status events)
+    // 6. Connect WebSocket first (so we receive sync_status events)
     let mut app = App::new(pseudo.clone(), room_id.clone(), own_address);
-    let mut ws_rx = match client.connect_ws(&room_id).await {
-        Ok(rx) => Some(rx),
+    let mut ws_rx = None;
+    let mut ws_tx = None;
+    match client.connect_ws(&room_id).await {
+        Ok((rx, tx)) => {
+            ws_rx = Some(rx);
+            ws_tx = Some(tx);
+        }
         Err(e) => {
             app.add_message(ChatMessage {
                 timestamp: "--:--".to_string(),
                 display_name: "system".to_string(),
                 text: format!("WebSocket failed: {e}"),
             });
-            None
         }
-    };
+    }
 
-    // 8. Try to load history — 404 means the room is still syncing
+    // 7. Try to load history — 404 means the room is still syncing
     match client.list_messages(&room_id).await {
         Ok(events) => {
             app.synced = true;
@@ -145,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 9. Event loop
+    // 8. Event loop
     let mut last_sync_retry = std::time::Instant::now();
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
@@ -158,7 +151,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(ref room) = event.room_id {
                         if room == &app.room_id {
                             if event.status.as_deref() == Some("synced") && !app.synced {
-                                // Room just synced — load history
+                                // Room just synced — re-subscribe + load history
+                                if let Some(ref tx) = ws_tx {
+                                    let _ = tx.send(api::NeoNetClient::ws_subscribe_msg(&app.room_id));
+                                }
                                 app.synced = true;
                                 app.messages.clear();
                                 if let Ok(events) = client.list_messages(&app.room_id).await {
@@ -188,6 +184,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !app.synced && last_sync_retry.elapsed() >= std::time::Duration::from_secs(3) {
             last_sync_retry = std::time::Instant::now();
             if let Ok(events) = client.list_messages(&room_id).await {
+                // Room appeared — re-subscribe so the daemon pushes new events
+                if let Some(ref tx) = ws_tx {
+                    let _ = tx.send(api::NeoNetClient::ws_subscribe_msg(&room_id));
+                }
                 app.synced = true;
                 app.messages.clear();
                 app.load_history(&events);
