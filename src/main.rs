@@ -96,20 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.room.unwrap()
     };
 
-    // 6. Load history
+    // 6. Connect WebSocket first (so we receive sync_status events)
     let mut app = App::new(pseudo.clone(), room_id.clone(), own_address);
-    match client.list_messages(&room_id).await {
-        Ok(events) => app.load_history(&events),
-        Err(e) => {
-            app.add_message(ChatMessage {
-                timestamp: "--:--".to_string(),
-                display_name: "system".to_string(),
-                text: format!("Failed to load history: {e}"),
-            });
-        }
-    }
-
-    // 7. Connect WebSocket
     let mut ws_rx = match client.connect_ws(&room_id).await {
         Ok(rx) => Some(rx),
         Err(e) => {
@@ -122,19 +110,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // 7. Try to load history — 404 means the room is still syncing
+    match client.list_messages(&room_id).await {
+        Ok(events) => {
+            app.synced = true;
+            app.load_history(&events);
+        }
+        Err(e) if e.contains("404") => {
+            app.synced = false;
+            app.add_message(ChatMessage {
+                timestamp: "--:--".to_string(),
+                display_name: "system".to_string(),
+                text: "Room syncing, waiting for peers...".to_string(),
+            });
+        }
+        Err(e) => {
+            app.synced = true;
+            app.add_message(ChatMessage {
+                timestamp: "--:--".to_string(),
+                display_name: "system".to_string(),
+                text: format!("Failed to load history: {e}"),
+            });
+        }
+    }
+
     // 8. Event loop
+    let mut last_sync_retry = std::time::Instant::now();
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Check for WS messages (non-blocking), skip our own events
         if let Some(ref mut rx) = ws_rx {
             while let Ok(event) = rx.try_recv() {
+                // Handle sync_status events
+                if event.r#type == "sync_status" {
+                    if let Some(ref room) = event.room_id {
+                        if room == &app.room_id {
+                            if event.status.as_deref() == Some("synced") && !app.synced {
+                                // Room just synced — load history
+                                app.synced = true;
+                                app.messages.clear();
+                                if let Ok(events) = client.list_messages(&app.room_id).await {
+                                    app.load_history(&events);
+                                }
+                                app.add_message(ChatMessage {
+                                    timestamp: "--:--".to_string(),
+                                    display_name: "system".to_string(),
+                                    text: "Room synced.".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 if event.author.as_deref() == Some(&app.own_address) {
                     continue;
                 }
                 if let Some(msg) = ws_event_to_chat_message(&event) {
                     app.add_message(msg);
                 }
+            }
+        }
+
+        // Periodic retry while waiting for sync (every 3 seconds)
+        if !app.synced && last_sync_retry.elapsed() >= std::time::Duration::from_secs(3) {
+            last_sync_retry = std::time::Instant::now();
+            if let Ok(events) = client.list_messages(&room_id).await {
+                app.synced = true;
+                app.messages.clear();
+                app.load_history(&events);
+                app.add_message(ChatMessage {
+                    timestamp: "--:--".to_string(),
+                    display_name: "system".to_string(),
+                    text: "Room synced.".to_string(),
+                });
             }
         }
 

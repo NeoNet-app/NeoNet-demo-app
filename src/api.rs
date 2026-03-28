@@ -66,6 +66,8 @@ pub struct WsEvent {
     pub kind: Option<String>,
     pub content: Option<Value>,
     pub ts_hint: Option<i64>,
+    /// Present on sync_status events: "syncing" | "synced" | "error"
+    pub status: Option<String>,
 }
 
 #[derive(Deserialize)]
